@@ -17,6 +17,10 @@ export interface ICandidateBallot extends Document {
   createdAt: Date;
   updatedAt: Date;
   publishedAt?: Date;
+  
+  // Instance methods
+  publish(): Promise<ICandidateBallot>;
+  unpublish(): Promise<ICandidateBallot>;
 }
 
 const CandidateSchema = new Schema<ICandidate>({

@@ -1,8 +1,8 @@
 import { Notification, INotification } from '../model/Notification';
-import { User } from '../model/User';
-import { Election } from '../model/Election';
-import { Voter } from '../model/Voter';
-import { Ballot } from '../model/Ballot';
+import User from '../model/User';
+import Election from '../model/Election';
+import Voter from '../model/Voter';
+import Ballot from '../model/Ballot';
 import { Types } from 'mongoose';
 
 export interface CreateNotificationData {

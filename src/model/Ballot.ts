@@ -53,6 +53,11 @@ export interface IBallot extends Document {
   createdAt: Date;
   updatedAt: Date;
   publishedAt?: Date;
+  
+  // Instance methods
+  publish(): Promise<IBallot>;
+  unpublish(): Promise<IBallot>;
+  createNewVersion(): Promise<IBallot>;
 }
 
 const BallotQuestionSchema = new Schema<IBallotQuestion>({

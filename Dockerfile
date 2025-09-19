@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.6
 
-FROM node:18-alpine AS base
+FROM node:20-alpine AS base
 WORKDIR /app
 ENV NODE_ENV=production
 
@@ -11,7 +11,7 @@ RUN apk add --no-cache bash python3 make g++
 COPY package*.json ./
 
 # Install deps
-RUN npm ci --only=production && npm cache clean --force
+RUN npm ci --omit=dev && npm cache clean --force
 
 # Build stage with dev deps
 FROM base AS build
@@ -25,7 +25,7 @@ COPY src/contracts/abis ./src/contracts/abis
 RUN npm run build
 
 # Runtime image
-FROM node:18-alpine AS runtime
+FROM node:20-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 

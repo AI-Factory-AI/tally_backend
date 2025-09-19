@@ -1,9 +1,12 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 const Notification_1 = require("../model/Notification");
-const User_1 = require("../model/User");
-const Election_1 = require("../model/Election");
-const Voter_1 = require("../model/Voter");
+const User_1 = __importDefault(require("../model/User"));
+const Election_1 = __importDefault(require("../model/Election"));
+const Voter_1 = __importDefault(require("../model/Voter"));
 const mongoose_1 = require("mongoose");
 class NotificationService {
     /**
@@ -197,7 +200,7 @@ class NotificationService {
      */
     async sendEmailNotification(notification) {
         try {
-            const recipient = await User_1.User.findById(notification.recipient);
+            const recipient = await User_1.default.findById(notification.recipient);
             if (!recipient?.email)
                 return;
             console.log(`Sending email to ${recipient.email}: ${notification.title}`);
@@ -235,7 +238,7 @@ class NotificationService {
      * Create system notifications for common events
      */
     async createElectionNotification(electionId, type, recipients) {
-        const election = await Election_1.Election.findById(electionId);
+        const election = await Election_1.default.findById(electionId);
         if (!election)
             return;
         const notificationData = {
@@ -251,7 +254,7 @@ class NotificationService {
         await this.createBulkNotifications(recipients, notificationData);
     }
     async createVoterNotification(voterId, type, recipients) {
-        const voter = await Voter_1.Voter.findById(voterId);
+        const voter = await Voter_1.default.findById(voterId);
         if (!voter)
             return;
         const notificationData = {

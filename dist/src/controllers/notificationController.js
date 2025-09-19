@@ -5,7 +5,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.healthCheck = exports.markAllAsRead = exports.getUnreadCount = exports.createBulkNotifications = exports.createNotification = exports.deleteNotification = exports.markNotificationsAsRead = exports.getNotificationStats = exports.getUserNotifications = void 0;
 const notificationService_1 = __importDefault(require("../service/notificationService"));
-const User_1 = require("../model/User");
+const User_1 = __importDefault(require("../model/User"));
 /**
  * Get user notifications with filters and pagination
  */
@@ -135,7 +135,7 @@ const createNotification = async (req, res) => {
             return res.status(401).json({ message: 'User not authenticated' });
         }
         // Check if user has permission to create notifications
-        const user = await User_1.User.findById(userId);
+        const user = await User_1.default.findById(userId);
         if (!user || user.role !== 'ADMIN') {
             return res.status(403).json({
                 success: false,
@@ -224,7 +224,7 @@ const createBulkNotifications = async (req, res) => {
             return res.status(401).json({ message: 'User not authenticated' });
         }
         // Check if user has permission to create bulk notifications
-        const user = await User_1.User.findById(userId);
+        const user = await User_1.default.findById(userId);
         if (!user || user.role !== 'ADMIN') {
             return res.status(403).json({
                 success: false,

@@ -935,9 +935,9 @@ const recordBlockchainVote = async (req, res) => {
         console.error('Error details:', {
             message: error instanceof Error ? error.message : String(error),
             stack: error instanceof Error ? error.stack : undefined,
-            electionId,
-            voterId,
-            txHash
+            electionId: req.params.electionId,
+            voterId: req.body.voterId,
+            txHash: req.body.txHash
         });
         return res.status(500).json({
             message: 'Failed to record blockchain vote',

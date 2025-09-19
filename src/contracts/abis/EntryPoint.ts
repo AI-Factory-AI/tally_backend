@@ -1,3 +1,2 @@
-import entryPointAbi from './EntryPoint.json';
-
-export const ABI_EntryPoint = entryPointAbi;
+// EntryPoint ABI - placeholder since JSON file is missing
+export const ABI_EntryPoint = [];

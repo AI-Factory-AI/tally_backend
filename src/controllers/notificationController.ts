@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import notificationService, { CreateNotificationData, NotificationFilters } from '../service/notificationService';
-import { User } from '../model/User';
+import User from '../model/User';
 
 export interface AuthRequest extends Request {
   user?: {
