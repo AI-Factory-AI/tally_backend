@@ -1,11 +1,12 @@
 import notificationService from './notificationService';
-import { Election } from '../model/Election';
-import { Voter } from '../model/Voter';
+import Election, { IElection } from '../model/Election';
+import Voter, { IVoter } from '../model/Voter';
 
 class BackgroundJobService {
   private cleanupInterval: NodeJS.Timeout | null = null;
   private scheduledNotificationInterval: NodeJS.Timeout | null = null;
   private reminderInterval: NodeJS.Timeout | null = null;
+  private electionActivationInterval: NodeJS.Timeout | null = null;
 
   /**
    * Start all background jobs
@@ -27,6 +28,11 @@ class BackgroundJobService {
     this.reminderInterval = setInterval(async () => {
       await this.sendReminderNotifications();
     }, 6 * 60 * 60 * 1000);
+
+    // Check for elections to activate every minute
+    this.electionActivationInterval = setInterval(async () => {
+      await this.activateElections();
+    }, 60 * 1000);
 
     console.log('Background jobs started successfully');
   }
@@ -50,6 +56,11 @@ class BackgroundJobService {
     if (this.reminderInterval) {
       clearInterval(this.reminderInterval);
       this.reminderInterval = null;
+    }
+    
+    if (this.electionActivationInterval) {
+      clearInterval(this.electionActivationInterval);
+      this.electionActivationInterval = null;
     }
     
     console.log('Background jobs stopped successfully');
@@ -126,7 +137,7 @@ class BackgroundJobService {
     try {
       // Get all voters for this election
       const voters = await Voter.find({ election: election._id, status: 'ACTIVE' });
-      const voterIds = voters.map(v => v.userId).filter(Boolean);
+      const voterIds = voters.map((v: any) => v.userId).filter(Boolean);
 
       if (voterIds.length === 0) return;
 
@@ -161,6 +172,75 @@ class BackgroundJobService {
   }
 
   /**
+   * Activate elections that have reached their start time
+   */
+  private async activateElections(): Promise<void> {
+    try {
+      const now = new Date();
+      
+      // Find elections that should be activated (SCHEDULED status and start time has passed)
+      const electionsToActivate = await Election.find({
+        status: 'SCHEDULED',
+        startTime: { $lte: now }
+      });
+
+      if (electionsToActivate.length > 0) {
+        console.log(`Found ${electionsToActivate.length} elections to activate`);
+        
+        for (const election of electionsToActivate) {
+          try {
+            // Update election status to ACTIVE
+            election.status = 'ACTIVE';
+            election.startedAt = new Date();
+            await election.save();
+            
+            console.log(`Election "${election.title}" (${election._id}) activated at ${election.startedAt}`);
+            
+            // Send notification to election creator about activation
+            await this.sendElectionActivationNotification(election);
+            
+          } catch (error) {
+            console.error(`Error activating election ${election._id}:`, error);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error in election activation job:', error);
+    }
+  }
+
+  /**
+   * Send notification when election is activated
+   */
+  private async sendElectionActivationNotification(election: any): Promise<void> {
+    try {
+      // Get all voters for this election
+      const voters = await Voter.find({ election: election._id, status: 'ACTIVE' });
+      const voterIds = voters.map((v: any) => v.userId).filter(Boolean);
+
+      if (voterIds.length > 0) {
+        await notificationService.createBulkNotifications(voterIds, {
+          type: 'ELECTION',
+          category: 'SUCCESS',
+          priority: 'HIGH',
+          title: 'Election Started!',
+          message: `Election "${election.title}" is now active and you can vote!`,
+          actionUrl: `/vote/${election._id}`,
+          actionText: 'Vote Now',
+          metadata: {
+            electionId: election._id,
+            notificationType: 'ELECTION_ACTIVATED'
+          }
+        });
+        
+        console.log(`Sent activation notifications to ${voterIds.length} voters for election ${election._id}`);
+      }
+    } catch (error) {
+      console.error(`Error sending activation notifications for election ${election._id}:`, error);
+    }
+  }
+
+  /**
    * Send reminders for elections ending soon
    */
   private async sendElectionEndingReminders(election: any): Promise<void> {
@@ -171,7 +251,7 @@ class BackgroundJobService {
         status: 'ACTIVE',
         hasVoted: { $ne: true }
       });
-      const voterIds = voters.map(v => v.userId).filter(Boolean);
+      const voterIds = voters.map((v: any) => v.userId).filter(Boolean);
 
       if (voterIds.length === 0) return;
 

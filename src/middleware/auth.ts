@@ -1,8 +1,14 @@
 import { Request, Response, NextFunction } from 'express';
+import { ParamsDictionary, Query } from 'express-serve-static-core';
 import jwt from 'jsonwebtoken';
 import User from '../model/User';
 
-export interface AuthRequest extends Request {
+export interface AuthRequest<
+  P extends ParamsDictionary = ParamsDictionary,
+  ResBody = any,
+  ReqBody = any,
+  ReqQuery extends Query = Query
+> extends Request<P, ResBody, ReqBody, ReqQuery> {
   user?: {
     id: string;
     email: string;
@@ -10,7 +16,10 @@ export interface AuthRequest extends Request {
   };
 }
 
-const JWT_SECRET = process.env.JWT_SECRET || 'changeme';
+const JWT_SECRET = process.env.JWT_SECRET as string;
+if (!JWT_SECRET) {
+  throw new Error('Missing JWT_SECRET environment variable');
+}
 
 export const authenticateToken = async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {

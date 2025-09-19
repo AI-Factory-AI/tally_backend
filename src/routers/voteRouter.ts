@@ -3,11 +3,14 @@ import { body, param, query } from 'express-validator';
 import { authenticateToken } from '../middleware/auth';
 import {
   submitVote,
+  submitBlockchainVote,
   getVoteByVoter,
   getElectionResults,
   getPublicElectionResults,
   confirmVoteOnBlockchain,
-  rejectVote
+  rejectVote,
+  prepareBlockchainVote,
+  recordBlockchainVote
 } from '../controllers/voteController';
 
 const router = express.Router();
@@ -56,6 +59,15 @@ const validateVoteRejection = [
 
 // Submit a vote
 router.post('/:electionId/vote', validateElectionId, validateVoteSubmission, submitVote);
+
+// Submit a blockchain vote
+router.post('/:electionId', validateElectionId, submitBlockchainVote);
+
+// Prepare tx data for manual wallet voting (no paymaster)
+router.post('/:electionId/prepare', validateElectionId, body('voterId').isString(), body('voteHash').isString(), prepareBlockchainVote);
+
+// Record a broadcasted tx hash from the frontend wallet
+router.post('/:electionId/record', validateElectionId, body('voterId').isString(), body('txHash').isString().isLength({ min: 66, max: 66 }), recordBlockchainVote);
 
 // Get vote by voter
 router.get('/:electionId/vote/:voterId', validateElectionId, validateVoterId, validateVoteQuery, getVoteByVoter);

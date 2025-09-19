@@ -9,7 +9,8 @@ import {
   updateVoterStatus,
   deleteVoter,
   verifyVoter,
-  exportVotersForDeployment
+  exportVotersForDeployment,
+  sendEmailsToPendingVoters
 } from '../controllers/voterController';
 
 const router = express.Router();
@@ -19,7 +20,7 @@ router.use(authenticateToken);
 
 // Validation middleware
 const validateVoterData = [
-  body('name').trim().isLength({ min: 1, max: 200 }).withMessage('Name is required and must be less than 200 characters'),
+  body('name').optional().trim().isLength({ min: 1, max: 200 }).withMessage('Name must be less than 200 characters if provided'),
   body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
   body('uniqueId').trim().isLength({ min: 1, max: 100 }).withMessage('Unique ID is required and must be less than 100 characters'),
   body('voteWeight').optional().isInt({ min: 1, max: 1000 }).withMessage('Vote weight must be between 1 and 1000'),
@@ -28,7 +29,7 @@ const validateVoterData = [
 
 const validateBulkImport = [
   body('voters').isArray({ min: 1 }).withMessage('Voters array is required with at least one voter'),
-  body('voters.*.name').trim().isLength({ min: 1, max: 200 }).withMessage('Each voter must have a valid name'),
+  body('voters.*.name').optional().trim().isLength({ min: 1, max: 200 }).withMessage('Name must be less than 200 characters if provided'),
   body('voters.*.email').isEmail().normalizeEmail().withMessage('Each voter must have a valid email'),
   body('voters.*.uniqueId').trim().isLength({ min: 1, max: 100 }).withMessage('Each voter must have a valid unique ID'),
   body('voters.*.voteWeight').optional().isInt({ min: 1, max: 1000 }).withMessage('Vote weight must be between 1 and 1000')
@@ -75,6 +76,9 @@ router.delete('/:electionId/voters/:voterId', validateElectionId, validateVoterI
 
 // Export voters for blockchain deployment
 router.get('/:electionId/voters/export', validateElectionId, exportVotersForDeployment);
+
+// Send emails to all pending voters and activate them
+router.post('/:electionId/voters/send-emails', validateElectionId, sendEmailsToPendingVoters);
 
 // Public route for voter verification (no authentication required)
 router.post('/verify/:token', verifyVoter);

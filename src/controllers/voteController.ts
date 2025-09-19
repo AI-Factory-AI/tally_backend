@@ -1,15 +1,19 @@
 import { Request, Response } from 'express';
+import mongoose from 'mongoose';
 import Vote from '../model/Vote';
 import Voter from '../model/Voter';
 import Ballot from '../model/Ballot';
 import Election from '../model/Election';
 import { AuthRequest } from '../middleware/auth';
-import { validationResult } from 'express-validator';
+import { validationResult as validateResult } from 'express-validator';
+import blockchainService from '../service/blockchainService';
+import { ethers } from 'ethers';
+import { CONTRACT_ADDRESSES } from '../config/blockchain';
 
 // Submit a vote
 export const submitVote = async (req: Request, res: Response) => {
   try {
-    const errors = validationResult(req);
+    const errors = validateResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ 
         message: 'Validation failed', 
@@ -17,7 +21,7 @@ export const submitVote = async (req: Request, res: Response) => {
       });
     }
 
-    const { electionId } = req.params;
+    const { electionId } = (req as Request<{ electionId: string }>).params;
     const { voterId, voterKey, choices, metadata } = req.body;
 
     // Check if election exists and is active
@@ -171,13 +175,13 @@ export const getVoteByVoter = async (req: Request, res: Response) => {
 };
 
 // Get election results (for election creator)
-export const getElectionResults = async (req: AuthRequest, res: Response) => {
+export const getElectionResults = async (req: AuthRequest<{ electionId: string }>, res: Response) => {
   try {
     if (!req.user) {
       return res.status(401).json({ message: 'Authentication required' });
     }
 
-    const { electionId } = req.params;
+    const { electionId } = (req as Request<{ electionId: string }>).params;
 
     // Check if election exists and user owns it
     const election = await Election.findById(electionId);
@@ -214,7 +218,15 @@ export const getElectionResults = async (req: AuthRequest, res: Response) => {
     const results = calculateElectionResults(ballot.questions, votes);
 
     // Get vote statistics
-    const voteStats = await Vote.getVoteStats(electionId);
+    const voteStats = await Vote.aggregate([
+      { $match: { electionId: new mongoose.Types.ObjectId(electionId) } },
+      {
+        $group: {
+          _id: '$status',
+          count: { $sum: 1 }
+        }
+      }
+    ]);
 
     res.status(200).json({
       election: {
@@ -317,7 +329,7 @@ export const getPublicElectionResults = async (req: Request, res: Response) => {
 };
 
 // Confirm vote on blockchain
-export const confirmVoteOnBlockchain = async (req: AuthRequest, res: Response) => {
+export const confirmVoteOnBlockchain = async (req: AuthRequest<{ voteId: string }>, res: Response) => {
   try {
     if (!req.user) {
       return res.status(401).json({ message: 'Authentication required' });
@@ -339,11 +351,12 @@ export const confirmVoteOnBlockchain = async (req: AuthRequest, res: Response) =
     }
 
     // Confirm vote
-    await vote.confirm(blockchainTxHash, blockchainBlockNumber);
-    if (ipfsCid) {
-      vote.ipfsCid = ipfsCid;
-      await vote.save();
-    }
+    vote.status = 'CONFIRMED';
+    vote.confirmedAt = new Date();
+    if (blockchainTxHash) vote.blockchainTxHash = blockchainTxHash;
+    if (blockchainBlockNumber) vote.blockchainBlockNumber = blockchainBlockNumber;
+    if (ipfsCid) vote.ipfsCid = ipfsCid;
+    await vote.save();
 
     res.status(200).json({
       message: 'Vote confirmed on blockchain',
@@ -366,7 +379,7 @@ export const confirmVoteOnBlockchain = async (req: AuthRequest, res: Response) =
 };
 
 // Reject vote
-export const rejectVote = async (req: AuthRequest, res: Response) => {
+export const rejectVote = async (req: AuthRequest<{ voteId: string }>, res: Response) => {
   try {
     if (!req.user) {
       return res.status(401).json({ message: 'Authentication required' });
@@ -392,7 +405,10 @@ export const rejectVote = async (req: AuthRequest, res: Response) => {
     }
 
     // Reject vote
-    await vote.reject(reason);
+    vote.status = 'REJECTED';
+    vote.rejectedAt = new Date();
+    vote.rejectionReason = reason;
+    await vote.save();
 
     // Reset voter's hasVoted status
     const voter = await Voter.findById(vote.voterId);
@@ -480,8 +496,8 @@ function calculateElectionResults(questions: any[], votes: any[]) {
   const results: any[] = [];
 
   for (const question of questions) {
-    const questionVotes = votes.filter(v => 
-      v.choices.some(c => c.questionId === question.questionId)
+    const questionVotes = votes.filter((v: any) => 
+      v.choices.some((c: any) => c.questionId === question.questionId)
     );
 
     if (question.type === 'single' || question.type === 'multiple') {
@@ -498,7 +514,7 @@ function calculateElectionResults(questions: any[], votes: any[]) {
 
       // Count votes
       for (const vote of questionVotes) {
-        const choice = vote.choices.find(c => c.questionId === question.questionId);
+        const choice = vote.choices.find((c: any) => c.questionId === question.questionId);
         if (choice && choice.selectedOptions) {
           for (const optionId of choice.selectedOptions) {
             optionCounts[optionId] = (optionCounts[optionId] || 0) + 1;
@@ -512,7 +528,7 @@ function calculateElectionResults(questions: any[], votes: any[]) {
         question: question.question,
         type: question.type,
         totalVotes: questionVotes.length,
-        options: question.options?.map(option => ({
+        options: question.options?.map((option: any) => ({
           optionId: option.optionId,
           text: option.text,
           value: option.value,
@@ -523,8 +539,8 @@ function calculateElectionResults(questions: any[], votes: any[]) {
       });
     } else if (question.type === 'text') {
       const textAnswers = questionVotes
-        .map(vote => {
-          const choice = vote.choices.find(c => c.questionId === question.questionId);
+        .map((vote: any) => {
+          const choice = vote.choices.find((c: any) => c.questionId === question.questionId);
           return choice?.textAnswer;
         })
         .filter(Boolean);
@@ -549,7 +565,7 @@ function calculateElectionResults(questions: any[], votes: any[]) {
 
       // Calculate ranking scores
       for (const vote of questionVotes) {
-        const choice = vote.choices.find(c => c.questionId === question.questionId);
+        const choice = vote.choices.find((c: any) => c.questionId === question.questionId);
         if (choice && choice.rankingOrder) {
           for (let i = 0; i < choice.rankingOrder.length; i++) {
             const optionId = choice.rankingOrder[i];
@@ -562,7 +578,7 @@ function calculateElectionResults(questions: any[], votes: any[]) {
 
       // Calculate average rankings
       const averageRankings = Object.entries(rankingResults).map(([optionId, rankings]) => {
-        const option = question.options?.find(o => o.optionId === optionId);
+        const option = question.options?.find((o: any) => o.optionId === optionId);
         let totalScore = 0;
         let totalVotes = 0;
 
@@ -592,3 +608,427 @@ function calculateElectionResults(questions: any[], votes: any[]) {
 
   return results;
 }
+
+// Submit a blockchain vote
+export const submitBlockchainVote = async (req: Request, res: Response) => {
+  try {
+    const { electionId } = req.params;
+    const { voterId, ballotId, selections, voteHash } = req.body;
+
+    // Validate required fields
+    if (!voterId || !ballotId || !selections || !voteHash) {
+      return res.status(400).json({ message: 'Missing required fields' });
+    }
+
+    // Get election
+    const election = await Election.findById(electionId);
+    if (!election) {
+      return res.status(404).json({ message: 'Election not found' });
+    }
+
+    // Check if election is active
+    if (election.status !== 'ACTIVE') {
+      return res.status(400).json({ message: 'Election is not active' });
+    }
+
+    // Check if election is deployed
+    if (!election.blockchainAddress) {
+      return res.status(400).json({ message: 'Election must be deployed to vote' });
+    }
+
+    // Check if voter is registered on blockchain
+    // Prefer voterId-based checks directly via contract to avoid address confusion
+    const { CONTRACT_ABIS } = await import('../config/blockchain');
+    const providerForChecks = new ethers.providers.JsonRpcProvider('https://rpc.sepolia-api.lisk.com');
+    const electionReadonly = new ethers.Contract(
+      election.blockchainAddress,
+      CONTRACT_ABIS.ElectionCore,
+      providerForChecks
+    );
+    const isRegisteredOnChain = await electionReadonly.isVoterIdRegistered(voterId);
+
+    if (!isRegisteredOnChain) {
+      return res.status(400).json({ message: 'Voter not registered on blockchain' });
+    }
+
+    // Check if voter has already voted on blockchain
+    const hasVotedOnChain = await electionReadonly.hasVoterIdVoted(voterId);
+
+    if (hasVotedOnChain) {
+      return res.status(400).json({ message: 'Voter has already voted on blockchain' });
+    }
+
+    // For blockchain voting, we need a wallet to sign the transaction
+    // In a real implementation, this would be handled by the frontend
+    // For now, we'll simulate the vote being cast
+    let blockchainTxHash: string | undefined;
+
+    try {
+      // In production, this is done by the frontend with the user's wallet
+      const voterPrivateKey = process.env.VOTER_PRIVATE_KEY;
+      if (!voterPrivateKey) {
+        throw new Error('Missing VOTER_PRIVATE_KEY for server-side demo voting');
+      }
+      
+      // Create a wallet instance
+      const provider = new ethers.providers.JsonRpcProvider(process.env.RPC_URL || 'https://rpc.sepolia-api.lisk.com');
+      const wallet = new ethers.Wallet(voterPrivateKey, provider);
+      
+      // Create contract instance
+      const { CONTRACT_ABIS } = await import('../config/blockchain');
+      const electionContract = new ethers.Contract(
+        election.blockchainAddress,
+        CONTRACT_ABIS.ElectionCore,
+        wallet
+      );
+
+      // Convert vote hash from hex string to bytes
+      const voteHashBytes = ethers.utils.arrayify('0x' + voteHash);
+
+      // Preflight: estimate gas and check balance/fees
+      const feeData = await provider.getFeeData();
+      const gasPrice = feeData.gasPrice || ethers.utils.parseUnits('1', 'gwei');
+      let estGas;
+      try {
+        estGas = await electionContract.estimateGas.castVoteById(voteHashBytes, voterId);
+      } catch (estErr: any) {
+        // Try to surface revert reason via callStatic
+        try {
+          await electionContract.callStatic.castVoteById(voteHashBytes, voterId);
+        } catch (simErr: any) {
+          const reason = (simErr?.error?.message) || (simErr?.data?.message) || simErr?.message || 'Simulation failed';
+          throw new Error(`Preflight revert: ${reason}`);
+        }
+        throw estErr;
+      }
+      const gasLimit = estGas.mul(120).div(100); // +20% buffer
+      const balance = await wallet.getBalance();
+      const estCost = gasLimit.mul(gasPrice);
+      if (balance.lt(estCost)) {
+        throw new Error(`Insufficient funds: balance ${ethers.utils.formatEther(balance)} < est cost ${ethers.utils.formatEther(estCost)}. Fund ${wallet.address}.`);
+      }
+
+      // Send transaction
+      const tx = await electionContract.castVoteById(voteHashBytes, voterId, {
+        gasLimit,
+        gasPrice,
+      });
+      const receipt = await tx.wait();
+      blockchainTxHash = tx.hash;
+
+    } catch (blockchainError) {
+      console.error('Blockchain voting error:', blockchainError);
+      const msg = (blockchainError as any)?.message || 'Unknown error';
+      return res.status(502).json({ message: 'Blockchain vote failed', details: msg });
+    }
+
+    // Find the voter by uniqueId to get the ObjectId
+    const voter = await Voter.findOne({ uniqueId: voterId, electionId });
+    if (!voter) {
+      return res.status(400).json({ message: 'Voter not found' });
+    }
+
+    // Create a default ballot ID (we'll use the election ID as ballot ID for now)
+    const ballotObjectId = new mongoose.Types.ObjectId();
+
+    // Convert selections to the expected choice format
+    const choices: any[] = [];
+    
+    // Add candidate votes as choices
+    const candidateArray = (selections && selections.candidates) || (req.body.candidateVotes) || (req.body.candidates);
+    if (candidateArray && candidateArray.length > 0) {
+      candidateArray.forEach((candidate: any, index: number) => {
+        choices.push({
+          questionId: `candidate_${index}`,
+          selectedOptions: [candidate.candidateId || candidate],
+          timestamp: new Date()
+        });
+      });
+    }
+    
+    // Add ballot question selections as choices
+    Object.entries(selections).forEach(([key, value]) => {
+      if (key.startsWith('question_') && value) {
+        const questionId = key.replace('question_', '');
+        choices.push({
+          questionId,
+          selectedOptions: Array.isArray(value) ? value : [value],
+          timestamp: new Date()
+        });
+      }
+    });
+
+    // Ensure blockchain tx succeeded before storing
+    if (!blockchainTxHash) {
+      return res.status(502).json({ message: 'Blockchain transaction missing' });
+    }
+
+    // Create vote record in database
+    const vote = new Vote({
+      electionId: new mongoose.Types.ObjectId(electionId),
+      voterId: voter._id,
+      ballotId: ballotObjectId,
+      choices,
+      status: 'CONFIRMED',
+      blockchainTxHash,
+      metadata: {
+        votingMethod: 'BLOCKCHAIN',
+        userAgent: req.headers['user-agent'],
+        ipAddress: req.ip || req.connection.remoteAddress
+      }
+    });
+
+    await vote.save();
+
+    res.json({
+      message: 'Vote submitted successfully',
+      vote: {
+        id: vote._id,
+        voterId: vote.voterId,
+        timestamp: vote.submittedAt,
+        isBlockchainVote: !!blockchainTxHash,
+        blockchainTxHash
+      }
+    });
+  } catch (error) {
+    console.error('Error submitting blockchain vote:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// Prepare on-chain vote transaction (frontend will send via wallet)
+export const prepareBlockchainVote = async (req: Request, res: Response) => {
+  try {
+    const { electionId } = req.params;
+    const { voterId, voteHash, from } = req.body as { voterId?: string; voteHash?: string; from?: string };
+
+    if (!voterId || !voteHash) {
+      return res.status(400).json({ message: 'voterId and voteHash are required' });
+    }
+
+    // Get election
+    const election = await Election.findById(electionId);
+    if (!election) {
+      return res.status(404).json({ message: 'Election not found' });
+    }
+
+    if (election.status !== 'ACTIVE') {
+      return res.status(400).json({ message: 'Election is not active' });
+    }
+
+    if (!election.blockchainAddress) {
+      return res.status(400).json({ message: 'Election must be deployed to vote' });
+    }
+
+    // Also enforce time window like the contract's onlyDuringElection
+    const now = Date.now();
+    const startMs = new Date(election.startTime).getTime();
+    const endMs = new Date(election.endTime).getTime();
+    if (!(now >= startMs && now <= endMs)) {
+      return res.status(400).json({ message: 'Election time window not active' });
+    }
+
+    // Ensure voter exists in DB
+    const voter = await Voter.findOne({ uniqueId: voterId, electionId });
+    if (!voter) {
+      return res.status(404).json({ message: 'Voter not found' });
+    }
+
+    // Chain config (Lisk Sepolia by default)
+    const rpcUrl = process.env.RPC_URL || 'https://rpc.sepolia-api.lisk.com';
+    const chainId = Number(process.env.CHAIN_ID || 4202);
+
+    const { CONTRACT_ABIS } = await import('../config/blockchain');
+    const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
+    const readonly = new ethers.Contract(
+      election.blockchainAddress,
+      CONTRACT_ABIS.ElectionCore,
+      provider
+    );
+
+    // On-chain eligibility checks (do not require on-chain active status; rely on time window above)
+    const isRegisteredOnChain = await readonly.isVoterIdRegistered(voterId);
+    console.log('Voter registered on-chain:', isRegisteredOnChain);
+    if (!isRegisteredOnChain) {
+      return res.status(400).json({ message: 'Voter not registered on blockchain' });
+    }
+    const hasVotedOnChain = await readonly.hasVoterIdVoted(voterId);
+    console.log('Voter has voted on-chain:', hasVotedOnChain);
+    if (hasVotedOnChain) {
+      return res.status(400).json({ message: 'Voter has already voted on blockchain' });
+    }
+
+    // Check if election is active on-chain
+    try {
+      const isElectionActive = await readonly.isElectionActive();
+      console.log('Election active on-chain:', isElectionActive);
+      if (!isElectionActive) {
+        return res.status(400).json({ message: 'Election is not active on-chain. Call startElection first.' });
+      }
+    } catch (activeErr) {
+      console.error('Error checking election active status:', activeErr);
+      return res.status(400).json({ message: 'Could not check election status on-chain' });
+    }
+
+    // Build calldata for castVoteById(bytes32,string)
+    const voteHashBytes = ethers.utils.arrayify('0x' + voteHash);
+    const iface = new ethers.utils.Interface(CONTRACT_ABIS.ElectionCore);
+    const data = iface.encodeFunctionData('castVoteById', [voteHashBytes, voterId]);
+
+    // Optional gas estimation (requires from) and preflight simulation to surface revert reasons
+    let gas: string | undefined;
+    try {
+      if (from) {
+        // Preflight simulation
+        try {
+          console.log('Running preflight simulation...');
+          const simResult = await provider.call({ to: election.blockchainAddress, data, from });
+          console.log('Preflight simulation successful:', simResult);
+        } catch (simErr: any) {
+          console.error('Preflight simulation failed:', simErr);
+          const msg = simErr?.error?.message || simErr?.data?.message || simErr?.message || 'Simulation failed';
+          return res.status(400).json({ message: `Transaction would revert: ${msg}` });
+        }
+        const est = await provider.estimateGas({ to: election.blockchainAddress, data, from });
+        gas = est.toHexString();
+      }
+    } catch (err) {
+      // best-effort; ignore estimation errors
+    }
+
+    return res.json({
+      transaction: {
+        to: election.blockchainAddress,
+        data,
+        value: '0x0',
+        chainId,
+        gas,
+      }
+    });
+  } catch (error) {
+    console.error('Prepare blockchain vote error:', error);
+    return res.status(500).json({ message: 'Failed to prepare blockchain vote' });
+  }
+};
+
+// Record an on-chain vote after the wallet broadcasts the transaction
+export const recordBlockchainVote = async (req: Request, res: Response) => {
+  try {
+    const { electionId } = req.params;
+    const { voterId, txHash, selections, voteHash } = req.body as { voterId?: string; txHash?: string; selections?: any; voteHash?: string };
+
+    if (!voterId || !txHash) {
+      return res.status(400).json({ message: 'voterId and txHash are required' });
+    }
+
+    const election = await Election.findById(electionId);
+    if (!election) {
+      return res.status(404).json({ message: 'Election not found' });
+    }
+    if (!election.blockchainAddress) {
+      return res.status(400).json({ message: 'Election must be deployed' });
+    }
+
+    const rpcUrl = process.env.RPC_URL || 'https://rpc.sepolia-api.lisk.com';
+    const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
+
+    // Verify tx on-chain
+    const receipt = await provider.getTransactionReceipt(txHash);
+    const statusOk = receipt && ((receipt as any).status === 1 || (receipt as any).status === '0x1');
+    if (!statusOk) {
+      return res.status(400).json({ message: 'Transaction not found or failed' });
+    }
+    if (receipt.to && receipt.to.toLowerCase() !== String(election.blockchainAddress).toLowerCase()) {
+      return res.status(400).json({ message: 'Transaction not sent to election contract' });
+    }
+
+    // Persist vote in DB if not already
+    const voter = await Voter.findOne({ uniqueId: voterId, electionId });
+    if (!voter) {
+      return res.status(404).json({ message: 'Voter not found' });
+    }
+
+    // Check if vote already exists
+    const existingVote = await Vote.findOne({ electionId: new mongoose.Types.ObjectId(electionId), voterId: voter._id });
+    if (existingVote) {
+      return res.json({
+        message: 'Vote already recorded',
+        vote: {
+          id: existingVote._id,
+          status: existingVote.status,
+          blockchainTxHash: existingVote.blockchainTxHash,
+          confirmedAt: existingVote.confirmedAt
+        }
+      });
+    }
+
+    // Build basic choices from provided selections if any; otherwise store minimal record
+    let choices: any[] = [];
+    try {
+      if (selections) {
+        Object.entries(selections).forEach(([key, value]) => {
+          if (key.startsWith('question_') && value) {
+            const questionId = key.replace('question_', '');
+            choices.push({
+              questionId,
+              selectedOptions: Array.isArray(value) ? value : [value],
+              timestamp: new Date()
+            });
+          }
+        });
+      }
+    } catch {}
+
+    // Ensure we have at least one choice to satisfy validation
+    if (choices.length === 0) {
+      choices.push({
+        questionId: 'blockchain_vote',
+        selectedOptions: ['confirmed'],
+        timestamp: new Date()
+      });
+    }
+
+    const vote = new Vote({
+      electionId: new mongoose.Types.ObjectId(electionId),
+      voterId: voter._id,
+      ballotId: new mongoose.Types.ObjectId(),
+      choices,
+      status: 'CONFIRMED',
+      blockchainTxHash: txHash,
+      metadata: {
+        votingMethod: 'BLOCKCHAIN',
+        voteHash: voteHash || undefined,
+        userAgent: req.headers['user-agent'],
+        ipAddress: (req as any).ip || (req as any).connection?.remoteAddress
+      }
+    });
+    await vote.save();
+
+    voter.hasVoted = true;
+    voter.lastActivity = new Date();
+    await voter.save();
+
+    return res.json({
+      message: 'On-chain vote recorded',
+      vote: {
+        id: vote._id,
+        status: vote.status,
+        blockchainTxHash: vote.blockchainTxHash,
+        confirmedAt: vote.confirmedAt
+      }
+    });
+  } catch (error) {
+    console.error('Record blockchain vote error:', error);
+    console.error('Error details:', {
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+      electionId,
+      voterId,
+      txHash
+    });
+    return res.status(500).json({ 
+      message: 'Failed to record blockchain vote',
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+};

@@ -6,8 +6,14 @@ import {
   updateElection,
   deleteElection,
   deployElection,
+  activateElection,
+  registerVoters,
   getPublicElections,
-  getElectionStats
+  getElectionStats,
+  getFactoryInfo,
+  preflightDeploy,
+  startElectionOnChain,
+  updateElectionDeployment
 } from '../controllers/electionController';
 import { 
   authenticateToken, 
@@ -29,12 +35,18 @@ router.use('/user', authenticateToken);
 router.post('/user', createElection);
 router.get('/user', getUserElections);
 router.get('/user/stats', getElectionStats);
+router.get('/user/factory-info', getFactoryInfo);
 
 // Individual election operations (require ownership)
 router.get('/user/:electionId', validateElectionOwnership, getElection);
 router.put('/user/:electionId', validateElectionOwnership, updateElection);
 router.delete('/user/:electionId', validateElectionOwnership, deleteElection);
+router.get('/user/:electionId/preflight', validateElectionOwnership, preflightDeploy);
 router.post('/user/:electionId/deploy', validateElectionOwnership, deployElection);
+router.post('/user/:electionId/update-deployment', validateElectionOwnership, updateElectionDeployment);
+router.post('/user/:electionId/activate', validateElectionOwnership, activateElection);
+router.post('/user/:electionId/start-onchain', validateElectionOwnership, startElectionOnChain);
+router.post('/user/:electionId/register-voters', validateElectionOwnership, registerVoters);
 
 // Public routes (optional authentication)
 router.get('/public', optionalAuth, getPublicElections);

@@ -1,13 +1,13 @@
 import { Request, Response, NextFunction } from 'express';
 import notificationService from '../service/notificationService';
-import { User } from '../model/User';
+import { IUser } from '../model/User';
 
 export interface NotificationEvent {
-  type: 'ELECTION_CREATED' | 'ELECTION_UPDATED' | 'ELECTION_ACTIVATED' | 'ELECTION_COMPLETED' | 'ELECTION_CANCELLED';
-  'VOTER_REGISTERED' | 'VOTER_VERIFIED' | 'VOTER_ACTIVATED' | 'VOTER_SUSPENDED';
-  'BALLOT_CREATED' | 'BALLOT_UPDATED' | 'BALLOT_PUBLISHED';
-  'VOTE_CAST' | 'VOTE_VERIFIED';
-  'SECURITY_ALERT' | 'SYSTEM_MAINTENANCE';
+  type: 'ELECTION_CREATED' | 'ELECTION_UPDATED' | 'ELECTION_ACTIVATED' | 'ELECTION_COMPLETED' | 'ELECTION_CANCELLED' |
+        'VOTER_REGISTERED' | 'VOTER_VERIFIED' | 'VOTER_ACTIVATED' | 'VOTER_SUSPENDED' | 'VOTER_DELETED' | 'VOTER_UPDATED' | 'VOTER_EXPORTED' |
+        'BALLOT_CREATED' | 'BALLOT_UPDATED' | 'BALLOT_PUBLISHED' |
+        'VOTE_CAST' | 'VOTE_VERIFIED' |
+        'SECURITY_ALERT' | 'SYSTEM_MAINTENANCE';
   electionId?: string;
   voterId?: string;
   ballotId?: string;
@@ -103,10 +103,10 @@ const getDefaultCategory = (eventType: string): 'INFO' | 'SUCCESS' | 'WARNING' |
   if (eventType.includes('CREATED') || eventType.includes('VERIFIED') || eventType.includes('ACTIVATED')) {
     return 'SUCCESS';
   }
-  if (eventType.includes('UPDATED') || eventType.includes('PUBLISHED')) {
+  if (eventType.includes('UPDATED') || eventType.includes('PUBLISHED') || eventType.includes('EXPORTED')) {
     return 'INFO';
   }
-  if (eventType.includes('SUSPENDED') || eventType.includes('CANCELLED')) {
+  if (eventType.includes('SUSPENDED') || eventType.includes('CANCELLED') || eventType.includes('DELETED')) {
     return 'WARNING';
   }
   if (eventType.includes('ALERT')) {
@@ -234,6 +234,30 @@ export const voterNotificationMiddleware = {
       type: 'VOTER_ACTIVATED',
       voterId,
       message: 'Voter has been activated and can now vote',
+      recipients: adminIds
+    }),
+
+  onSuspended: (voterId: string, adminIds: string[]) =>
+    sendNotificationAfterOperation({
+      type: 'VOTER_SUSPENDED',
+      voterId,
+      message: 'Voter has been suspended',
+      recipients: adminIds
+    }),
+
+  onDeleted: (voterId: string, adminIds: string[]) =>
+    sendNotificationAfterOperation({
+      type: 'VOTER_DELETED',
+      voterId,
+      message: 'Voter has been removed',
+      recipients: adminIds
+    }),
+
+  onExported: (electionId: string, adminIds: string[]) =>
+    sendNotificationAfterOperation({
+      type: 'VOTER_EXPORTED',
+      electionId,
+      message: 'Voters have been exported for blockchain deployment',
       recipients: adminIds
     })
 };

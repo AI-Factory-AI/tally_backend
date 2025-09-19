@@ -12,6 +12,12 @@ export interface IVoter extends Document {
   blockchainAddress?: string;
   voteWeight: number;
   hasVoted: boolean;
+  // Email delivery tracking
+  emailDeliveryStatus?: 'PENDING' | 'SENT' | 'FAILED';
+  emailSentAt?: Date;
+  lastEmailError?: string;
+  inviteCount?: number;
+  lastInviteAt?: Date;
   verificationToken?: string;
   verificationExpires?: Date;
   registeredAt: Date;
@@ -23,6 +29,15 @@ export interface IVoter extends Document {
     organization?: string;
     customFields?: Record<string, any>;
   };
+  
+  // Instance methods
+  decryptVoterKey(): string | null;
+}
+
+// Interface for the Voter model with static methods
+export interface IVoterModel extends mongoose.Model<IVoter> {
+  generateVoterKey(): string;
+  generateVerificationToken(): string;
 }
 
 const VoterSchema = new Schema<IVoter>({
@@ -34,7 +49,7 @@ const VoterSchema = new Schema<IVoter>({
   },
   name: {
     type: String,
-    required: true,
+    required: false,
     trim: true,
     maxlength: 200
   },
@@ -64,7 +79,7 @@ const VoterSchema = new Schema<IVoter>({
   },
   voterKeyHash: {
     type: String,
-    required: true,
+    required: false, // Make it optional, we'll generate it in controller
     index: true
   },
   blockchainAddress: {
@@ -81,6 +96,24 @@ const VoterSchema = new Schema<IVoter>({
   hasVoted: {
     type: Boolean,
     default: false
+  },
+  emailDeliveryStatus: {
+    type: String,
+    enum: ['PENDING', 'SENT', 'FAILED'],
+    default: 'PENDING'
+  },
+  emailSentAt: {
+    type: Date
+  },
+  lastEmailError: {
+    type: String
+  },
+  inviteCount: {
+    type: Number,
+    default: 0
+  },
+  lastInviteAt: {
+    type: Date
   },
   verificationToken: {
     type: String,
@@ -121,37 +154,82 @@ VoterSchema.index({ electionId: 1, uniqueId: 1 }, { unique: true });
 
 // Pre-save middleware to encrypt voter key and generate hash
 VoterSchema.pre('save', async function(next) {
-  if (this.isModified('voterKey')) {
-    // Encrypt the voter key using environment variable
-    const encryptionKey = process.env.VOTER_KEY_ENCRYPTION_KEY || 'default-key-change-in-production';
-    const iv = crypto.randomBytes(16);
-    const cipher = crypto.createCipher('aes-256-cbc', encryptionKey);
+  try {
+    console.log('Pre-save hook running...');
+    console.log('voterKey exists:', !!this.voterKey);
+    console.log('voterKeyHash exists:', !!this.voterKeyHash);
+    console.log('isModified voterKey:', this.isModified('voterKey'));
+    console.log('isNew:', this.isNew);
     
-    let encrypted = cipher.update(this.voterKey, 'utf8', 'hex');
-    encrypted += cipher.final('hex');
+    if (this.isModified('voterKey') || (this.voterKey && !this.voterKeyHash)) {
+      console.log('Processing voterKey encryption and hash generation...');
+      // Check if encryption key is properly set
+      const encryptionKey = process.env.VOTER_KEY_ENCRYPTION_KEY;
+      if (!encryptionKey) {
+        throw new Error('Missing VOTER_KEY_ENCRYPTION_KEY');
+      }
+      const keyToUse = encryptionKey;
+      const iv = crypto.randomBytes(16);
+      
+      // Use modern crypto methods (scrypt + createCipheriv)
+      const derivedKey = crypto.scryptSync(keyToUse, 'salt', 32);
+      const cipher = crypto.createCipheriv('aes-256-cbc', derivedKey, iv);
+      
+      let encrypted = cipher.update(this.voterKey, 'utf8', 'hex');
+      encrypted += cipher.final('hex');
+      
+      // Store encrypted key with IV
+      const encryptedWithIv = `${iv.toString('hex')}:${encrypted}`;
+      this.voterKey = encryptedWithIv;
+      
+      // Do not overwrite voterKeyHash if already provided by controller
+      if (!this.voterKeyHash) {
+        // WARNING: Without plaintext we cannot derive correct hash here.
+        // Leave hash unset to be handled by controller when creating the voter.
+      }
+      console.log('voterKeyHash generated:', this.voterKeyHash);
+    } else {
+      console.log('Skipping voterKey processing...');
+    }
     
-    // Store encrypted key with IV
-    this.voterKey = `${iv.toString('hex')}:${encrypted}`;
+    if (this.isModified('status') && this.status === 'VERIFIED') {
+      this.verifiedAt = new Date();
+    }
     
-    // Generate hash for blockchain (this will be visible)
-    this.voterKeyHash = crypto.createHash('sha256').update(this.voterKey).digest('hex');
+    next();
+  } catch (error) {
+    console.error('Error in Voter pre-save middleware:', error);
+    next(error as Error);
   }
-  
-  if (this.isModified('status') && this.status === 'VERIFIED') {
-    this.verifiedAt = new Date();
-  }
-  
-  next();
 });
 
 // Instance method to decrypt voter key (only for verification purposes)
 VoterSchema.methods.decryptVoterKey = function(): string | null {
   try {
-    const encryptionKey = process.env.VOTER_KEY_ENCRYPTION_KEY || 'default-key-change-in-production';
+    if (!this.voterKey) {
+      return null;
+    }
+    // If there's no IV delimiter, assume the key is already plaintext (legacy/bulk insert)
+    if (!this.voterKey.includes(':')) {
+      return this.voterKey;
+    }
+
+    const encryptionKey = process.env.VOTER_KEY_ENCRYPTION_KEY as string;
+    if (!encryptionKey) {
+      throw new Error('Missing VOTER_KEY_ENCRYPTION_KEY');
+    }
     const [ivHex, encrypted] = this.voterKey.split(':');
+    if (!ivHex || !encrypted) {
+      console.error('Invalid voter key format');
+      return null;
+    }
+    
     const iv = Buffer.from(ivHex, 'hex');
     
-    const decipher = crypto.createDecipher('aes-256-cbc', encryptionKey);
+    // Use modern crypto methods (scrypt + createDecipheriv)
+    const derivedKey = crypto.scryptSync(encryptionKey, 'salt', 32);
+    const decipher = crypto.createDecipheriv('aes-256-cbc', derivedKey, iv);
+    
     let decrypted = decipher.update(encrypted, 'hex', 'utf8');
     decrypted += decipher.final('utf8');
     
@@ -164,7 +242,14 @@ VoterSchema.methods.decryptVoterKey = function(): string | null {
 
 // Static method to generate secure voter key
 VoterSchema.statics.generateVoterKey = function(): string {
-  return crypto.randomBytes(32).toString('hex');
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; 
+  const length = 10;
+  let code = '';
+  for (let i = 0; i < length; i++) {
+    const idx = crypto.randomInt(0, alphabet.length);
+    code += alphabet[idx];
+  }
+  return code; // 10-char human-friendly key
 };
 
 // Static method to generate verification token
@@ -172,5 +257,5 @@ VoterSchema.statics.generateVerificationToken = function(): string {
   return crypto.randomBytes(32).toString('hex');
 };
 
-const Voter = mongoose.model<IVoter>('Voter', VoterSchema);
+const Voter = mongoose.model<IVoter, IVoterModel>('Voter', VoterSchema);
 export default Voter;

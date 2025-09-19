@@ -3,9 +3,10 @@ import { User } from '../model/User';
 import { Election } from '../model/Election';
 import { Voter } from '../model/Voter';
 import { Ballot } from '../model/Ballot';
+import { Types } from 'mongoose';
 
 export interface CreateNotificationData {
-  recipient: string;
+  recipient: string | Types.ObjectId;
   sender?: string;
   type: 'SYSTEM' | 'ELECTION' | 'VOTER' | 'BALLOT' | 'SECURITY' | 'REMINDER';
   category: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR' | 'DESTRUCTIVE';
@@ -46,21 +47,20 @@ class NotificationService {
     try {
       const notification = new Notification({
         ...data,
+        recipient: typeof data.recipient === 'string' ? new Types.ObjectId(data.recipient) : data.recipient,
         priority: data.priority || 'MEDIUM',
         deliveryMethod: data.deliveryMethod || 'IN_APP'
       });
 
       await notification.save();
       
-      // If scheduled for future, don't deliver immediately
       if (data.scheduledFor && data.scheduledFor > new Date()) {
-        return notification;
+        return notification.toObject() as INotification;
       }
 
-      // Deliver immediately if not scheduled
       await this.deliverNotification(notification);
       
-      return notification;
+      return notification.toObject() as INotification;
     } catch (error) {
       console.error('Error creating notification:', error);
       throw new Error('Failed to create notification');
@@ -77,20 +77,21 @@ class NotificationService {
     try {
       const notifications = recipients.map(recipientId => ({
         ...data,
-        recipient: recipientId,
+        recipient: new Types.ObjectId(recipientId),
         priority: data.priority || 'MEDIUM',
         deliveryMethod: data.deliveryMethod || 'IN_APP'
       }));
 
-      const createdNotifications = await Notification.insertMany(notifications);
+      const createdDocs = await Notification.insertMany(notifications);
       
-      // Deliver immediate notifications
-      const immediateNotifications = createdNotifications.filter(
+      const createdNotifications = createdDocs.map(doc => doc.toObject() as INotification);
+      
+      const immediateDocs = createdDocs.filter(
         n => !n.scheduledFor || n.scheduledFor <= new Date()
       );
 
-      for (const notification of immediateNotifications) {
-        await this.deliverNotification(notification);
+      for (const notificationDoc of immediateDocs) {
+        await this.deliverNotification(notificationDoc as INotification);
       }
 
       return createdNotifications;
@@ -108,10 +109,23 @@ class NotificationService {
     filters: NotificationFilters = {}
   ): Promise<{ notifications: INotification[]; pagination: any }> {
     try {
-      const { page = 1, limit = 20 } = filters;
-      
-      const notifications = await Notification.getNotifications(userId, filters);
-      const total = await Notification.countDocuments({ recipient: userId });
+      const { page = 1, limit = 20, read, type, category, priority } = filters;
+      const userObjectId = new Types.ObjectId(userId);
+
+      const query: Record<string, any> = { recipient: userObjectId };
+      if (typeof read === 'boolean') query.read = read;
+      if (type) query.type = type;
+      if (category) query.category = category;
+      if (priority) query.priority = priority;
+
+      const [notifications, total] = await Promise.all([
+        Notification.find(query)
+          .sort({ createdAt: -1 })
+          .skip((page - 1) * limit)
+          .limit(limit)
+          .lean<INotification[]>(),
+        Notification.countDocuments({ recipient: userObjectId })
+      ]);
       
       return {
         notifications,
@@ -133,19 +147,20 @@ class NotificationService {
    */
   async getUserNotificationStats(userId: string): Promise<NotificationStats> {
     try {
+      const userObjectId = new Types.ObjectId(userId);
       const [total, unread, byType, byCategory, byPriority] = await Promise.all([
-        Notification.countDocuments({ recipient: userId }),
-        Notification.getUnreadCount(userId),
+        Notification.countDocuments({ recipient: userObjectId }),
+        Notification.countDocuments({ recipient: userObjectId, read: false }),
         Notification.aggregate([
-          { $match: { recipient: userId } },
+          { $match: { recipient: userObjectId } },
           { $group: { _id: '$type', count: { $sum: 1 } } }
         ]),
         Notification.aggregate([
-          { $match: { recipient: userId } },
+          { $match: { recipient: userObjectId } },
           { $group: { _id: '$category', count: { $sum: 1 } } }
         ]),
         Notification.aggregate([
-          { $match: { recipient: userId } },
+          { $match: { recipient: userObjectId } },
           { $group: { _id: '$priority', count: { $sum: 1 } } }
         ])
       ]);
@@ -153,9 +168,9 @@ class NotificationService {
       return {
         total,
         unread,
-        byType: byType.reduce((acc, item) => ({ ...acc, [item._id]: item.count }), {}),
-        byCategory: byCategory.reduce((acc, item) => ({ ...acc, [item._id]: item.count }), {}),
-        byPriority: byPriority.reduce((acc, item) => ({ ...acc, [item._id]: item.count }), {})
+        byType: byType.reduce((acc, item) => ({ ...acc, [item._id]: item.count }), {} as Record<string, number>),
+        byCategory: byCategory.reduce((acc, item) => ({ ...acc, [item._id]: item.count }), {} as Record<string, number>),
+        byPriority: byPriority.reduce((acc, item) => ({ ...acc, [item._id]: item.count }), {} as Record<string, number>)
       };
     } catch (error) {
       console.error('Error getting notification stats:', error);
@@ -168,7 +183,14 @@ class NotificationService {
    */
   async markAsRead(userId: string, notificationIds?: string[]): Promise<{ message: string }> {
     try {
-      await Notification.markAsRead(userId, notificationIds);
+      const filter: Record<string, any> = {
+        recipient: new Types.ObjectId(userId)
+      };
+      if (notificationIds && notificationIds.length > 0) {
+        filter._id = { $in: notificationIds.map(id => new Types.ObjectId(id)) };
+      }
+
+      await Notification.updateMany(filter, { $set: { read: true, readAt: new Date() } });
       return { message: 'Notifications marked as read' };
     } catch (error) {
       console.error('Error marking notifications as read:', error);
@@ -183,7 +205,7 @@ class NotificationService {
     try {
       const result = await Notification.findOneAndDelete({
         _id: notificationId,
-        recipient: userId
+        recipient: new Types.ObjectId(userId)
       });
 
       if (!result) {
@@ -200,32 +222,29 @@ class NotificationService {
   /**
    * Deliver a notification based on its delivery method
    */
-  private async deliverNotification(notification: INotification): Promise<void> {
+  private async deliverNotification(notification: INotification | (INotification & { toObject?: () => INotification })) : Promise<void> {
     try {
-      switch (notification.deliveryMethod) {
+      const n: any = typeof (notification as any).toObject === 'function' ? (notification as any).toObject() : notification;
+
+      switch (n.deliveryMethod) {
         case 'IN_APP':
-          // In-app notifications are automatically delivered
-          notification.delivered = true;
-          notification.deliveredAt = new Date();
+          n.delivered = true;
+          n.deliveredAt = new Date();
           break;
-        
         case 'EMAIL':
-          await this.sendEmailNotification(notification);
+          await this.sendEmailNotification(n as INotification);
           break;
-        
         case 'PUSH':
-          await this.sendPushNotification(notification);
+          await this.sendPushNotification(n as INotification);
           break;
-        
         case 'SMS':
-          await this.sendSMSNotification(notification);
+          await this.sendSMSNotification(n as INotification);
           break;
       }
 
-      await notification.save();
+      await Notification.updateOne({ _id: (n as any)._id }, { $set: { delivered: n.delivered, deliveredAt: n.deliveredAt } });
     } catch (error) {
       console.error('Error delivering notification:', error);
-      // Don't throw error to prevent notification creation from failing
     }
   }
 
@@ -237,11 +256,9 @@ class NotificationService {
       const recipient = await User.findById(notification.recipient);
       if (!recipient?.email) return;
 
-      // TODO: Integrate with email service (SendGrid, AWS SES, etc.)
       console.log(`Sending email to ${recipient.email}: ${notification.title}`);
       
-      notification.delivered = true;
-      notification.deliveredAt = new Date();
+      await Notification.updateOne({ _id: (notification as any)._id }, { $set: { delivered: true, deliveredAt: new Date() } });
     } catch (error) {
       console.error('Error sending email notification:', error);
     }
@@ -252,11 +269,8 @@ class NotificationService {
    */
   private async sendPushNotification(notification: INotification): Promise<void> {
     try {
-      // TODO: Integrate with push notification service (Firebase, OneSignal, etc.)
       console.log(`Sending push notification: ${notification.title}`);
-      
-      notification.delivered = true;
-      notification.deliveredAt = new Date();
+      await Notification.updateOne({ _id: (notification as any)._id }, { $set: { delivered: true, deliveredAt: new Date() } });
     } catch (error) {
       console.error('Error sending push notification:', error);
     }
@@ -267,11 +281,8 @@ class NotificationService {
    */
   private async sendSMSNotification(notification: INotification): Promise<void> {
     try {
-      // TODO: Integrate with SMS service (Twilio, AWS SNS, etc.)
       console.log(`Sending SMS notification: ${notification.title}`);
-      
-      notification.delivered = true;
-      notification.deliveredAt = new Date();
+      await Notification.updateOne({ _id: (notification as any)._id }, { $set: { delivered: true, deliveredAt: new Date() } });
     } catch (error) {
       console.error('Error sending SMS notification:', error);
     }
@@ -293,7 +304,7 @@ class NotificationService {
       category: 'INFO' as const,
       priority: 'MEDIUM' as const,
       title: `Election ${type.toLowerCase()}`,
-      message: `Election "${election.title}" has been ${type.toLowerCase()}`,
+      message: `Election \"${election.title}\" has been ${type.toLowerCase()}`,
       actionUrl: `/app/election/${electionId}`,
       actionText: 'View Election',
       metadata: { electionId, action: type }
@@ -343,9 +354,6 @@ class NotificationService {
     await this.createNotification(notificationData);
   }
 
-  /**
-   * Clean up expired notifications
-   */
   async cleanupExpiredNotifications(): Promise<{ deletedCount: number }> {
     try {
       const result = await Notification.deleteMany({
@@ -359,9 +367,6 @@ class NotificationService {
     }
   }
 
-  /**
-   * Process scheduled notifications
-   */
   async processScheduledNotifications(): Promise<{ processedCount: number }> {
     try {
       const scheduledNotifications = await Notification.find({
